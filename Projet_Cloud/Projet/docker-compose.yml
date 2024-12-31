@@ -1,0 +1,123 @@
+# Définition des services à orchestrer
+services:
+
+  # Service Kafka Broker
+  # Le service broker représente le nœud principal Kafka, qui sert de canal de communication entre les producteurs (Producer) et les consommateurs (Consumer).
+
+  broker:
+    image: apache/kafka:latest  # Utilise la dernière version de l'image officielle de Kafka
+    container_name: broker  # Nom du conteneur pour une identification facile
+    networks:
+      - kafka_network  # Connecte ce service au réseau nommé 'kafka_network'
+    environment:
+      KAFKA_NODE_ID: 1  # Identifiant unique du nœud Kafka (nécessaire pour KRaft)
+      KAFKA_PROCESS_ROLES: broker,controller  # Ce nœud joue les rôles de broker et de contrôleur, les noeuds permettent à la fois de stocker les données et de gérer les messages 
+      KAFKA_LISTENERS: PLAINTEXT://broker:9092,CONTROLLER://broker:9093  # Configurations des listeners :
+        # broker:9092 est utilisé pour les producteurs et consommateurs
+        # broker:9093 est utilisé pour la gestion du cluster
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://broker:9092  # Adresse publique que Kafka annonce aux clients
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER  # Nom du listener pour le contrôleur
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT  # Mappe les protocoles de sécurité des listeners
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@broker:9093  # Définit que ce nœud est un votant pour le quorum
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1  # Facteur de réplication pour le topic des offsets (1 car un seul broker)
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1  # Facteur de réplication pour les logs de transactions
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1  # Minimum des réplicas en ligne pour écrire un log de transaction
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0  # Retard initial pour équilibrer les groupes de consommateurs
+      KAFKA_NUM_PARTITIONS: 3  # Définit 3 partitions par défaut pour les nouveaux topics
+
+
+
+  # Service MongoDB
+  # on stocke les messages consommés depuis kafka et on sauvegarde les données de manière persistente sans les perdre grace à mango_data
+
+  mongo:
+    image: mongo  # Utilise l'image officielle de MongoDB
+    container_name: mongo  # Nom du conteneur pour MongoDB
+    networks:
+      - kafka_network  # Connecte MongoDB au même réseau que les autres services
+    restart: always  # Redémarre toujours le conteneur en cas de crash
+    volumes:
+      - mango_data:/data/db  # Monte un volume pour persister les données MongoDB
+
+
+
+  # Service Consumer Kafka
+  # lit les messages publiés dans un topic Kafka, puis les insère dans la base de données MongoDB
+  #Ne démarre que si MongoDB (mongo) et Kafka Broker (broker) sont opérationnels.
+
+  mongodb_python:
+    image: matheo444/consumer.py  # Image Docker personnalisée contenant le code consommateur Kafka
+    networks:
+      - kafka_network  # Connecte ce service au réseau 'kafka_network'
+    container_name: mongodb_python  # Nom du conteneur pour ce service
+    depends_on:
+      - mongo  # Assure que MongoDB est prêt avant de démarrer ce service
+      - broker  # Assure que le broker Kafka est prêt avant de démarrer ce service
+
+
+
+  # Service Producteur Kafka
+  # génère et envoie des messages (comme des tickets) au topic Kafka configuré.
+  # Ne démarre que si le Kafka Broker (broker) est prêt.
+  # Envoie les messages au Kafka Broker (broker) pour qu’ils soient consommés par d’autres services.
+
+  producer:
+    image: matheo444/producer.py  # Image Docker personnalisée contenant le code producteur Kafka
+    container_name: producer  # Nom du conteneur pour ce service
+    networks:
+      - kafka_network  # Connecte ce service au réseau 'kafka_network'
+    depends_on:
+      - broker  # Assure que le broker Kafka est prêt avant de démarrer ce service
+
+
+
+  # Service API pour les statistiques
+  #  fournit des statistiques basées sur les données stockées dans MongoDB.
+  # stat_data : Permet de sauvegarder les données générées par l'API.
+
+  stats_api:
+    image: matheo444/stats.py  # Image Docker personnalisée pour une API fournissant des statistiques
+    container_name: stats_api  # Nom du conteneur pour ce service
+    networks:
+      - kafka_network  # Connecte ce service au réseau 'kafka_network'
+    depends_on:
+      - mongo  # Assure que MongoDB est prêt avant de démarrer ce service
+    environment:
+      - MONGO_URI=mongodb://mongo:27017  # URI pour connecter cette API à MongoDB
+    ports:
+      - 8000:8000  # Expose l'API sur le port 8000 de l'hôte
+    volumes:
+      - stat_data:/data  # Monte un volume pour stocker les données utilisées par cette API
+
+
+
+  # Service Interface utilisateur (Streamlit)
+  # interface utilisateur construite avec Streamlit pour afficher les données et les statistiques sous forme graphique.
+  # Ne démarre que si l’API des statistiques (stats_api), MongoDB (mongo), et Kafka Broker (broker) sont opérationnels.
+  
+  interface:
+    image: matheo444/interface.py  # Image Docker personnalisée pour l'interface utilisateur Streamlit
+    container_name: interface  # Nom du conteneur pour ce service
+    networks:
+      - kafka_network  # Connecte ce service au réseau 'kafka_network'
+    depends_on:
+      - stats_api  # Assure que l'API des statistiques est prête avant de démarrer ce service
+      - mongo  # Assure que MongoDB est prêt avant de démarrer ce service
+      - broker  # Assure que le broker Kafka est prêt avant de démarrer ce service
+    ports:
+      - 8501:8501  # Expose Streamlit sur le port 8501 de l'hôte
+    environment:
+      - STREAMLIT_SERVER_PORT=8501  # Configure Streamlit pour écouter sur le port 8501
+      - STREAMLIT_SERVER_ADDRESS=0.0.0.0  # Configure Streamlit pour accepter des connexions depuis n'importe où
+    volumes:
+      - streamlit:/data  # Monte un volume pour stocker les fichiers Streamlit
+
+# Définition des réseaux Docker
+networks:
+  kafka_network:  # Réseau commun pour permettre la communication entre les services
+
+# Définition des volumes Docker, on utilise ici les volumes pour rendre le stockage des données persistantes ce qui est très utile 
+volumes:
+  mango_data:  # Volume pour persister les données MongoDB
+  stat_data:  # Volume pour les données de l'API de statistiques
+  streamlit:  # Volume pour les fichiers et données Streamlit
